@@ -12,7 +12,7 @@ from roboflow import Roboflow
 
 st.set_page_config(page_title="Oil Palm Tree Detector", layout="wide")
 
-st.title("🌴 Oil Palm Tree Detection & GIS Exporter")
+st.title("🌴 Oil Palm Tree Detection")
 st.write("Upload your drone orthophoto (.tif), let the AI find the tree crowns, and download your sorted ArcMap-ready Shapefile.")
 
 # Sidebar Settings
