@@ -6,7 +6,7 @@ import rasterio
 import geopandas as gpd
 import zipfile
 import tempfile
-import time
+import matplotlib.pyplot as plt
 from shapely.geometry import Point
 from roboflow import Roboflow
 
@@ -21,8 +21,8 @@ def load_roboflow_model(api_key, version_number):
     project = rf.workspace("hanifs-workspace-bd93u").project("oil-palm-tree-detection-sv9gl")
     return project.version(version_number).model
 
-st.title("🌴 Live Oil Palm Tree Detection")
-st.write("Upload your drone orthophoto (.tif) to watch the AI detect tree crowns live, one by one.")
+st.title("🌴 Oil Palm Tree Detection")
+st.write("Upload your drone orthophoto (.tif), let the AI find the tree crowns, and download your sorted ArcMap-ready Shapefile.")
 
 # Sidebar Settings
 st.sidebar.header("AI Settings")
@@ -30,16 +30,12 @@ api_key = st.sidebar.text_input("Roboflow API Key", value="yVaMpDjeXPH2Mzqs41u7"
 confidence_setting = st.sidebar.slider("Confidence Limit (%)", min_value=1, max_value=100, value=5)
 overlap_setting = st.sidebar.slider("Overlap Limit (%)", min_value=1, max_value=100, value=50)
 
-st.sidebar.header("Live Visual Controls")
-# Controls how fast each tree dot appears on screen
-anim_delay = st.sidebar.slider("Live Speed Delay (sec)", min_value=0.01, max_value=0.50, value=0.08, step=0.01)
-
 # File Uploader
 uploaded_file = st.file_uploader("Upload Drone GeoTIFF Image (.tif)", type=["tif", "tiff"])
 
 if uploaded_file is not None:
     # -----------------------------------------------------------------
-    # STEP 1: INITIAL LOADING BARS
+    # STEP 1: INITIAL LOADING PROGRESS BAR
     # -----------------------------------------------------------------
     load_progress = st.progress(0, text="📂 Uploading and opening image file...")
     
@@ -68,89 +64,70 @@ if uploaded_file is not None:
     temp_jpg_path = os.path.join(tempfile.gettempdir(), "temp_ready.jpg")
     cv2.imwrite(temp_jpg_path, cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR))
 
-    load_progress.progress(75, text="🧠 Requesting YOLOv11 predictions from Roboflow...")
+    load_progress.progress(75, text="🧠 Requesting YOLO model predictions from Roboflow...")
 
     try:
         model = load_roboflow_model(api_key=api_key, version_number=10)
         predictions = model.predict(temp_jpg_path, confidence=confidence_setting, overlap=overlap_setting).json()
         
-        load_progress.progress(100, text="✅ AI Model response received! Starting live detection...")
-        time.sleep(0.5)
-        load_progress.empty()  # Clear initial loading bar
-
-        # -----------------------------------------------------------------
-        # STEP 2: LIVE ONE-BY-ONE DETECTION FEED
-        # -----------------------------------------------------------------
-        st.subheader("📡 Live AI Tree Crown Detection Feed")
-        
-        # Placeholders for live visual updates
-        live_status = st.empty()
-        detection_progress = st.progress(0)
-        live_image_display = st.empty()
-
-        raw_preds = predictions.get("predictions", [])
-        total_found = len(raw_preds)
+        load_progress.progress(90, text="📍 Mapping coordinates and generating preview...")
 
         map_points = []
-        # Create an working copy of the image array to draw green dots on
-        display_canvas = img_data.copy()
+        pixel_coords = []
 
-        if total_found > 0:
-            for idx, pred in enumerate(raw_preds):
-                pixel_x = int(pred["x"])
-                pixel_y = int(pred["y"])
-
-                # Calculate GIS spatial coordinates
+        if "predictions" in predictions:
+            for pred in predictions["predictions"]:
+                pixel_x, pixel_y = pred["x"], pred["y"]
                 map_x, map_y = transform * (pixel_x, pixel_y)
                 map_points.append(Point(map_x, map_y))
+                pixel_coords.append((pixel_x, pixel_y))
 
-                # Draw outer black border circle and inner green target dot
-                cv2.circle(display_canvas, (pixel_x, pixel_y), 10, (0, 0, 0), -1)
-                cv2.circle(display_canvas, (pixel_x, pixel_y), 7, (0, 255, 0), -1)
+        load_progress.progress(100, text="✅ Detection complete!")
+        load_progress.empty()  # Clear loading bar once done
 
-                # Update live image display
-                live_image_display.image(display_canvas, caption=f"Live Feed: {idx + 1} / {total_found} Palm Crowns Found", use_container_width=True)
+        # -----------------------------------------------------------------
+        # STEP 2: DISPLAY RESULTS & EXPORT SHAPEFILE
+        # -----------------------------------------------------------------
+        if len(map_points) > 0:
+            st.success(f"🎉 Mapped {len(map_points)} Tree Crowns successfully!")
+
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                st.subheader("AI Detection Preview")
+                fig, ax = plt.subplots(figsize=(10, 8))
+                ax.imshow(img_data)
+                for px, py in pixel_coords:
+                    ax.scatter(px, py, c='#00FF00', s=15, edgecolors='black', linewidths=1, zorder=5)
+                ax.axis('off')
+                st.pyplot(fig)
+                plt.close(fig)
+
+            with col2:
+                st.subheader("Export GIS Shapefile")
+                gdf = gpd.GeoDataFrame(geometry=map_points, crs=crs)
                 
-                # Update status message and progress bar
-                live_status.markdown(f"🎯 **Detecting Tree #{idx + 1}** at Pixel `({pixel_x}, {pixel_y})` | GIS Map: `({map_x:.2f}, {map_y:.2f})`")
-                detection_progress.progress((idx + 1) / total_found)
+                if crs is not None:
+                    gdf_wgs84 = gdf.to_crs(epsg=4326)
+                    gdf['Latitude'] = gdf_wgs84.geometry.y.astype(float)
+                    gdf['Longitude'] = gdf_wgs84.geometry.x.astype(float)
+                else:
+                    gdf['Latitude'] = gdf.geometry.y.astype(float)
+                    gdf['Longitude'] = gdf.geometry.x.astype(float)
+                    
+                gdf['Altitude'] = 0.0
 
-                # Delay to create the step-by-step visual effect
-                time.sleep(anim_delay)
+                temp_dir = tempfile.mkdtemp()
+                output_base = os.path.join(temp_dir, "detected_palm_centers")
+                gdf.to_file(output_base + '.shp', driver="ESRI Shapefile")
 
-            st.success(f"🎉 Detection finished! Mapped all {total_found} tree crowns successfully.")
+                zip_path = os.path.join(temp_dir, "detected_palm_centers.zip")
+                with zipfile.ZipFile(zip_path, 'w') as zipf:
+                    for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                        file_part = output_base + ext
+                        if os.path.exists(file_part):
+                            zipf.write(file_part, os.path.basename(file_part))
 
-            # -------------------------------------------------------------
-            # STEP 3: EXPORT SHAPEFILE & ATTRIBUTES
-            # -------------------------------------------------------------
-            st.divider()
-            st.subheader("💾 Export GIS Shapefile")
-            
-            gdf = gpd.GeoDataFrame(geometry=map_points, crs=crs)
-            
-            if crs is not None:
-                gdf_wgs84 = gdf.to_crs(epsg=4326)
-                gdf['Latitude'] = gdf_wgs84.geometry.y.astype(float)
-                gdf['Longitude'] = gdf_wgs84.geometry.x.astype(float)
-            else:
-                gdf['Latitude'] = gdf.geometry.y.astype(float)
-                gdf['Longitude'] = gdf.geometry.x.astype(float)
-                
-            gdf['Altitude'] = 0.0
-
-            temp_dir = tempfile.mkdtemp()
-            output_base = os.path.join(temp_dir, "detected_palm_centers")
-            gdf.to_file(output_base + '.shp', driver="ESRI Shapefile")
-
-            zip_path = os.path.join(temp_dir, "detected_palm_centers.zip")
-            with zipfile.ZipFile(zip_path, 'w') as zipf:
-                for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
-                    file_part = output_base + ext
-                    if os.path.exists(file_part):
-                        zipf.write(file_part, os.path.basename(file_part))
-
-            col_a, col_b = st.columns([1, 2])
-            with col_a:
                 with open(zip_path, "rb") as f:
                     st.download_button(
                         label="💾 Download ArcMap Shapefile (.zip)",
@@ -158,7 +135,7 @@ if uploaded_file is not None:
                         file_name="detected_palm_centers.zip",
                         mime="application/zip"
                     )
-            with col_b:
+                
                 st.write("Attributes Preview:")
                 st.dataframe(gdf[['Latitude', 'Longitude', 'Altitude']].head(10))
 
