@@ -1,89 +1,83 @@
+# 1. Install dependencies
+!pip install -q streamlit geopandas shapely rasterio pyngrok
+!npm install -g localtunnel
+
+# 2. Write the Streamlit application code
+%%writefile app.py
 import os
 import shutil
 import tempfile
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 import streamlit as st
+import rasterio
 from shapely.geometry import Point
-from PIL import Image
 
-st.set_page_config(page_title="Detection & Shapefile Exporter", layout="wide")
+st.set_page_config(page_title="Orthophoto Detector", layout="wide")
+st.title("🛰️ Large Orthophoto Feature Detector")
 
-st.title("🛰️ Object Detection & Shapefile Exporter")
-st.write("Upload an image, detect features, and download the resulting point spatial dataset as a Shapefile.")
+# Input for the Colab path
+file_path = st.text_input(
+    "Paste your Colab file path here:", 
+    value="/content/your_orthophoto.tif",
+    help="Right-click your file in the Colab sidebar and select 'Copy path'"
+)
 
-# 1. File Upload
-uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png", "tif", "tiff"])
+if st.button("Run Detection"):
+    if not os.path.exists(file_path):
+        st.error(f"File not found at `{file_path}`. Please check the path and try again.")
+    else:
+        with st.spinner("Reading geospatial metadata and detecting features..."):
+            try:
+                # Open GeoTIFF using rasterio
+                with rasterio.open(file_path) as src:
+                    bounds = src.bounds
+                    crs = src.crs
+                    
+                    st.info(f"Loaded GeoTIFF | Resolution: {src.width}x{src.height} px | CRS: {crs}")
+                    
+                    # --- DETECTION LOGIC (Mock coordinates within image bounds) ---
+                    np.random.seed(42)
+                    random_xs = np.random.uniform(bounds.left, bounds.right, 5)
+                    random_ys = np.random.uniform(bounds.bottom, bounds.top, 5)
+                    confidences = np.random.uniform(0.85, 0.99, 5)
+                    
+                    # Create Spatial GeoDataFrame
+                    geometry = [Point(x, y) for x, y in zip(random_xs, random_ys)]
+                    gdf = gpd.GeoDataFrame(
+                        {"id": range(1, 6), "confidence": np.round(confidences, 2)},
+                        geometry=geometry,
+                        crs=crs
+                    )
+                    
+                    # Convert to standard lat/lon for output
+                    if gdf.crs and gdf.crs != "EPSG:4326":
+                        gdf = gdf.to_crs("EPSG:4326")
 
-if uploaded_file is not None:
-    # Display uploaded image
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-    
-    if st.button("Run Detection"):
-        with st.spinner("Processing image and extracting point coordinates..."):
-            
-            # --- REPLACE THIS SECTION WITH YOUR ACTUAL DETECTION MODEL ---
-            # Simulating detection output: generating 5 mock (longitude, latitude) points
-            # or (X, Y) pixel coordinates
-            np.random.seed(42)
-            img_width, img_height = image.size
-            
-            # Example coordinates (adjust CRS to EPSG:4326 for lat/lon or EPSG:3857)
-            random_lons = np.random.uniform(-122.45, -122.40, 5)
-            random_lats = np.random.uniform(37.75, 37.80, 5)
-            confidences = np.random.uniform(0.75, 0.98, 5)
-            labels = ["detected_object"] * 5
-            
-            # -------------------------------------------------------------
-            
-            # Create GeoDataFrame
-            geometry = [Point(lon, lat) for lon, lat in zip(random_lons, random_lats)]
-            gdf = gpd.GeoDataFrame(
-                {
-                    "id": range(1, len(geometry) + 1),
-                    "label": labels,
-                    "confidence": np.round(confidences, 2)
-                },
-                geometry=geometry,
-                crs="EPSG:4326"  # Standard WGS84 projection
-            )
-            
-            st.success(f"Detected {len(gdf)} points!")
-            st.dataframe(gdf.drop(columns="geometry"))
+                st.success(f"Detected {len(gdf)} spatial points!")
+                st.dataframe(gdf.drop(columns="geometry"))
 
-            # Save Shapefile into a temporary directory to keep it clean
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                shp_base_name = "detected_points"
-                shp_path = os.path.join(tmp_dir, f"{shp_base_name}.shp")
-                zip_path_without_ext = os.path.join(tmp_dir, "detected_points")
-                
-                # Save Shapefile components (.shp, .shx, .dbf, .prj)
-                gdf.to_file(shp_path, driver="ESRI Shapefile")
-                
-                # Compress all shapefile components into a single ZIP archive
-                zip_archive = shutil.make_archive(
-                    base_name=zip_path_without_ext,
-                    format="zip",
-                    root_dir=tmp_dir
+                # Package Shapefile into ZIP
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    shp_path = os.path.join(tmp_dir, "detected_points.shp")
+                    gdf.to_file(shp_path, driver="ESRI Shapefile")
+                    
+                    zip_archive = shutil.make_archive(
+                        base_name=os.path.join(tmp_dir, "detected_points"),
+                        format="zip",
+                        root_dir=tmp_dir
+                    )
+                    
+                    with open(zip_archive, "rb") as f:
+                        zip_bytes = f.read()
+
+                # Streamlit download button
+                st.download_button(
+                    label="📥 Download Shapefile (.zip)",
+                    data=zip_bytes,
+                    file_name="detected_points.zip",
+                    mime="application/zip"
                 )
-                
-                # Read the zipped file into memory for downloading
-                with open(zip_archive, "rb") as f:
-                    zip_bytes = f.read()
-            
-            # Streamlit Download Button
-            st.download_button(
-                label="📥 Download Points Shapefile (.zip)",
-                data=zip_bytes,
-                file_name="detected_points.zip",
-                mime="application/zip"
-            )
-            import urllib.request
 
-           # Get public IP (needed as password for localtunnel)
-           print("Password/IP for LocalTunnel:", urllib.request.urlopen('https://ipv4.icanhazip.com').read().decode('utf8').strip())
-
-           # Run Streamlit in background and serve via LocalTunnel
-           !streamlit run app.py & npx localtunnel --port 8501
+            except Exception as e:
+                st.error(f"Error processing image: {e}")
