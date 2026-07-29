@@ -68,9 +68,20 @@ if input_method == "Upload File (Small/Medium)":
             temp_tif.write(uploaded_file.read())
             tif_path = temp_tif.name
 else:
-    tif_path = st.text_input("Enter absolute file path on server/computer (e.g. /content/large_plot.tif or C:/data/plot.tif)")
+    raw_path_input = st.text_input("Enter absolute file path on server/computer (e.g. /content/large_plot.tif or C:/data/plot.tif)")
+    if raw_path_input:
+        # Clean path: strip whitespace, quotes, and normalize backslashes/slashes
+        clean_path = raw_path_input.strip().strip('"').strip("'")
+        clean_path = os.path.normpath(clean_path)
+        
+        if os.path.exists(clean_path):
+            tif_path = clean_path
+            st.success(f"✅ File located: `{clean_path}`")
+        else:
+            st.error(f"❌ File not found at path: `{clean_path}`. Please verify the path or ensure the Streamlit server has read access to this directory.")
 
-if tif_path and os.path.exists(tif_path):
+# Run Detection Section
+if tif_path:
     if st.button("🚀 Run Full Plot Detection"):
         try:
             model = load_roboflow_model(api_key, 10)
