@@ -1,201 +1,83 @@
-import streamlit as st
+%%writefile app.py
 import os
-import cv2
-import numpy as np
-import rasterio
-import rasterio.windows
-import geopandas as gpd
-import zipfile
+import shutil
 import tempfile
-import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import streamlit as st
 from shapely.geometry import Point
-from scipy.spatial import cKDTree
-from roboflow import Roboflow
+from PIL import Image
 
-st.set_page_config(page_title="Large Scale Oil Palm Detector", layout="wide")
+st.set_page_config(page_title="Detection & Shapefile Exporter", layout="wide")
 
-# Cache model connection
-@st.cache_resource
-def load_roboflow_model(api_key, version_number):
-    rf = Roboflow(api_key=api_key)
-    project = rf.workspace("hanifs-workspace-bd93u").project("oil-palm-tree-detection-sv9gl")
-    return project.version(version_number).model
+st.title("🛰️ Object Detection & Shapefile Exporter")
+st.write("Upload an image, detect features, and download the resulting point spatial dataset as a Shapefile.")
 
-# Distance-based NMS to remove duplicate detections from overlapping tiles
-def filter_duplicate_points(map_points, distance_threshold_meters=2.0):
-    if not map_points:
-        return []
+# 1. File Upload
+uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png", "tif", "tiff"])
+
+if uploaded_file is not None:
+    # Display uploaded image
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_column_width=True)
     
-    coords = np.array([[p.x, p.y] for p in map_points])
-    tree = cKDTree(coords)
-    
-    keep = []
-    visited = set()
-    
-    for i, point in enumerate(coords):
-        if i in visited:
-            continue
-        keep.append(map_points[i])
-        # Find all points within the threshold distance and mark them as duplicate
-        indices = tree.query_ball_point(point, r=distance_threshold_meters)
-        visited.update(indices)
-        
-    return keep
-
-st.title("🌴 Large-Scale Oil Palm Plantation Detector")
-st.write("Process full orthomosaics (up to 10GB+) using tiled memory management and automatic coordinate deduplication.")
-
-# Sidebar Settings
-st.sidebar.header("AI Settings")
-api_key = st.sidebar.text_input("Roboflow API Key", value="yVaMpDjeXPH2Mzqs41u7", type="password")
-confidence_setting = st.sidebar.slider("Confidence Limit (%)", min_value=1, max_value=100, value=15)
-overlap_setting = st.sidebar.slider("AI Internal Overlap (%)", min_value=1, max_value=100, value=30)
-
-st.sidebar.header("Tiling Settings")
-tile_size = st.sidebar.selectbox("Tile Size (Pixels)", [512, 640, 1024], index=2)
-tile_overlap = st.sidebar.slider("Tile Overlap (Pixels)", min_value=32, max_value=256, value=128, step=32)
-dedup_distance = st.sidebar.slider("Duplicate Merge Distance (Meters)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-
-# Input method option for large files
-input_method = st.radio("File Source:", ["Upload File (Small/Medium)", "Local File Path (Best for 5GB-10GB Files)"])
-
-tif_path = None
-
-if input_method == "Upload File (Small/Medium)":
-    uploaded_file = st.file_uploader("Upload GeoTIFF (.tif)", type=["tif", "tiff"])
-    if uploaded_file is not None:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tif") as temp_tif:
-            temp_tif.write(uploaded_file.read())
-            tif_path = temp_tif.name
-else:
-    raw_path_input = st.text_input("Enter absolute file path on server/computer (e.g. /content/large_plot.tif or C:/data/plot.tif)")
-    if raw_path_input:
-        # Clean path: strip whitespace, quotes, and normalize backslashes/slashes
-        clean_path = raw_path_input.strip().strip('"').strip("'")
-        clean_path = os.path.normpath(clean_path)
-        
-        if os.path.exists(clean_path):
-            tif_path = clean_path
-            st.success(f"✅ File located: `{clean_path}`")
-        else:
-            st.error(f"❌ File not found at path: `{clean_path}`. Please verify the path or ensure the Streamlit server has read access to this directory.")
-
-# Run Detection Section
-if tif_path:
-    if st.button("🚀 Run Full Plot Detection"):
-        try:
-            model = load_roboflow_model(api_key, 10)
+    if st.button("Run Detection"):
+        with st.spinner("Processing image and extracting point coordinates..."):
             
-            with rasterio.open(tif_path) as src:
-                width = src.width
-                height = src.height
-                transform = src.transform
-                crs = src.crs
+            # --- REPLACE THIS SECTION WITH YOUR ACTUAL DETECTION MODEL ---
+            # Simulating detection output: generating 5 mock (longitude, latitude) points
+            # or (X, Y) pixel coordinates
+            np.random.seed(42)
+            img_width, img_height = image.size
+            
+            # Example coordinates (adjust CRS to EPSG:4326 for lat/lon or EPSG:3857)
+            random_lons = np.random.uniform(-122.45, -122.40, 5)
+            random_lats = np.random.uniform(37.75, 37.80, 5)
+            confidences = np.random.uniform(0.75, 0.98, 5)
+            labels = ["detected_object"] * 5
+            
+            # -------------------------------------------------------------
+            
+            # Create GeoDataFrame
+            geometry = [Point(lon, lat) for lon, lat in zip(random_lons, random_lats)]
+            gdf = gpd.GeoDataFrame(
+                {
+                    "id": range(1, len(geometry) + 1),
+                    "label": labels,
+                    "confidence": np.round(confidences, 2)
+                },
+                geometry=geometry,
+                crs="EPSG:4326"  # Standard WGS84 projection
+            )
+            
+            st.success(f"Detected {len(gdf)} points!")
+            st.dataframe(gdf.drop(columns="geometry"))
 
-                stride = tile_size - tile_overlap
-                x_steps = list(range(0, width, stride))
-                y_steps = list(range(0, height, stride))
-                total_tiles = len(x_steps) * len(y_steps)
-
-                st.info(f"📊 Image Dimensions: {width}x{height} px | Grid Split: {total_tiles} Tiles")
-
-                progress_bar = st.progress(0, text="Starting grid tile scan...")
+            # Save Shapefile into a temporary directory to keep it clean
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                shp_base_name = "detected_points"
+                shp_path = os.path.join(tmp_dir, f"{shp_base_name}.shp")
+                zip_path_without_ext = os.path.join(tmp_dir, "detected_points")
                 
-                raw_map_points = []
-                tile_count = 0
-
-                temp_dir = tempfile.mkdtemp()
-                temp_tile_path = os.path.join(temp_dir, "tile.jpg")
-
-                # Iterate through grid windows without loading full image to RAM
-                for y in y_steps:
-                    for x in x_steps:
-                        tile_count += 1
-                        
-                        # Define pixel window
-                        w_width = min(tile_size, width - x)
-                        w_height = min(tile_size, height - y)
-                        window = rasterio.windows.Window(x, y, w_width, w_height)
-
-                        # Read only current tile window
-                        tile_data = src.read(window=window)
-                        if tile_data.shape[0] >= 3:
-                            tile_data = tile_data[:3, :, :]
-                        tile_data = np.moveaxis(tile_data, 0, -1)
-
-                        if tile_data.dtype != np.uint8:
-                            tile_data = cv2.normalize(tile_data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-
-                        # Skip blank/black background tiles
-                        if np.mean(tile_data) < 5:
-                            continue
-
-                        cv2.imwrite(temp_tile_path, cv2.cvtColor(tile_data, cv2.COLOR_RGB2BGR))
-
-                        # Predict on single tile
-                        preds = model.predict(temp_tile_path, confidence=confidence_setting, overlap=overlap_setting).json()
-
-                        if "predictions" in preds:
-                            for p in preds["predictions"]:
-                                # Convert tile-relative coordinates to full image coordinates
-                                global_pixel_x = x + p["x"]
-                                global_pixel_y = y + p["y"]
-
-                                # Translate to map GIS coordinates
-                                map_x, map_y = transform * (global_pixel_x, global_pixel_y)
-                                raw_map_points.append(Point(map_x, map_y))
-
-                        # Progress update
-                        progress_percent = int((tile_count / total_tiles) * 100)
-                        progress_bar.progress(
-                            progress_percent, 
-                            text=f"Scanning Tile {tile_count}/{total_tiles} ({progress_percent}%) | Detected: {len(raw_map_points)} Palms"
-                        )
-
-                progress_bar.progress(100, text="🧹 Removing duplicate boundary detections...")
+                # Save Shapefile components (.shp, .shx, .dbf, .prj)
+                gdf.to_file(shp_path, driver="ESRI Shapefile")
                 
-                # Filter boundary duplicates
-                final_points = filter_duplicate_points(raw_map_points, distance_threshold_meters=dedup_distance)
-                progress_bar.empty()
-
-                st.success(f"🎉 Plot Scanning Complete! Total Trees Detected: {len(final_points)} (Removed {len(raw_map_points) - len(final_points)} duplicates)")
-
-                # Export Shapefile
-                if len(final_points) > 0:
-                    gdf = gpd.GeoDataFrame(geometry=final_points, crs=crs)
-                    
-                    if crs is not None:
-                        gdf_wgs84 = gdf.to_crs(epsg=4326)
-                        gdf['Latitude'] = gdf_wgs84.geometry.y.astype(float)
-                        gdf['Longitude'] = gdf_wgs84.geometry.x.astype(float)
-                    else:
-                        gdf['Latitude'] = gdf.geometry.y.astype(float)
-                        gdf['Longitude'] = gdf.geometry.x.astype(float)
-                        
-                    gdf['Altitude'] = 0.0
-
-                    output_base = os.path.join(temp_dir, "detected_palm_centers")
-                    gdf.to_file(output_base + '.shp', driver="ESRI Shapefile")
-
-                    zip_path = os.path.join(temp_dir, "detected_palm_centers.zip")
-                    with zipfile.ZipFile(zip_path, 'w') as zipf:
-                        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
-                            file_part = output_base + ext
-                            if os.path.exists(file_part):
-                                zipf.write(file_part, os.path.basename(file_part))
-
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
-                        with open(zip_path, "rb") as f:
-                            st.download_button(
-                                label="💾 Download Plot Shapefile (.zip)",
-                                data=f,
-                                file_name="detected_palm_centers.zip",
-                                mime="application/zip"
-                            )
-                    with col2:
-                        st.write("Attributes Preview:")
-                        st.dataframe(gdf[['Latitude', 'Longitude', 'Altitude']].head(10))
-
-        except Exception as e:
-            st.error(f"Error while running plot detection: {e}")
+                # Compress all shapefile components into a single ZIP archive
+                zip_archive = shutil.make_archive(
+                    base_name=zip_path_without_ext,
+                    format="zip",
+                    root_dir=tmp_dir
+                )
+                
+                # Read the zipped file into memory for downloading
+                with open(zip_archive, "rb") as f:
+                    zip_bytes = f.read()
+            
+            # Streamlit Download Button
+            st.download_button(
+                label="📥 Download Points Shapefile (.zip)",
+                data=zip_bytes,
+                file_name="detected_points.zip",
+                mime="application/zip"
+            )
