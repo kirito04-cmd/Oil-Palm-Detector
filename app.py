@@ -3,7 +3,6 @@
 !npm install -g localtunnel
 
 # 2. Write the Streamlit application code
-%%writefile app.py
 import os
 import shutil
 import tempfile
