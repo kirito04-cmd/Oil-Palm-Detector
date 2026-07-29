@@ -80,3 +80,10 @@ if uploaded_file is not None:
                 file_name="detected_points.zip",
                 mime="application/zip"
             )
+            import urllib.request
+
+           # Get public IP (needed as password for localtunnel)
+           print("Password/IP for LocalTunnel:", urllib.request.urlopen('https://ipv4.icanhazip.com').read().decode('utf8').strip())
+
+           # Run Streamlit in background and serve via LocalTunnel
+           !streamlit run app.py & npx localtunnel --port 8501
