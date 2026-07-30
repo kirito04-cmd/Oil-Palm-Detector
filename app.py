@@ -11,7 +11,7 @@ from roboflow import Roboflow
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
-st.set_page_config(page_title="Oil Palm Detection", layout="wide")
+st.set_page_config(page_title="Oil Palm Center Mapping", layout="wide")
 
 # Fixed model/inference defaults
 API_KEY = "yVaMpDjeXPH2Mzqs41u7"
@@ -39,7 +39,7 @@ confidence_setting = st.sidebar.slider(
 # -----------------------------------------------------------------------------
 # MAIN CONTENT
 # -----------------------------------------------------------------------------
-st.title("🌴 Oil Palm Precision Center Mapper")
+st.title("🌴 Oil Palm Detection")
 st.write(
     "Extract spatial metadata from GeoTIFF files and map palm crowns into a ready-to-export GIS shapefile package."
 )
