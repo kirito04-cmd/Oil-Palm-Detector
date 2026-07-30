@@ -11,7 +11,7 @@ from roboflow import Roboflow
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
-st.set_page_config(page_title="Oil Palm Center Mapping", layout="wide")
+st.set_page_config(page_title="Oil Palm Detection", layout="wide")
 
 # Fixed model/inference defaults
 API_KEY = "yVaMpDjeXPH2Mzqs41u7"
