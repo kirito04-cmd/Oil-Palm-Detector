@@ -1,18 +1,21 @@
 import os
-import shutil
 import tempfile
+import zipfile
 import cv2
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
 import rasterio
-import rasterio.windows
 import streamlit as st
 from roboflow import Roboflow
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
 
-st.set_page_config(page_title="Oil Palm Detection", layout="wide")
+st.set_page_config(page_title="Oil Palm Center Mapping", layout="wide")
+
+# Fixed model/inference defaults
+API_KEY = "yVaMpDjeXPH2Mzqs41u7"
+OVERLAP_SETTING = 50
 
 
 # Cache model connection
@@ -25,100 +28,31 @@ def load_roboflow_model(api_key, version_number):
     return project.version(version_number).model
 
 
-# Distance-based NMS to remove duplicate detections from overlapping tiles
-def filter_duplicate_points(map_points, distance_threshold_meters=2.0):
-    if not map_points:
-        return []
-
-    coords = np.array([[p.x, p.y] for p in map_points])
-    tree = cKDTree(coords)
-
-    keep = []
-    visited = set()
-
-    for i, point in enumerate(coords):
-        if i in visited:
-            continue
-        keep.append(map_points[i])
-        indices = tree.query_ball_point(point, r=distance_threshold_meters)
-        visited.update(indices)
-
-    return keep
-
-
-# Safely render overlay visualization
-def render_detection_preview(tif_path, gdf, max_dim=1024):
-    with rasterio.open(tif_path) as src:
-        orig_w, orig_h = src.width, src.height
-        scale = max_dim / max(orig_w, orig_h)
-        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-
-        # Read downsampled RGB bands
-        data = src.read([1, 2, 3], out_shape=(3, new_h, new_w))
-        data = np.moveaxis(data, 0, -1)
-
-        if data.dtype != np.uint8:
-            data = cv2.normalize(
-                data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
-            )
-
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.imshow(data)
-
-        if not gdf.empty:
-            pixel_x = []
-            pixel_y = []
-            for point in gdf.geometry:
-                row, col = src.index(point.x, point.y)
-                pixel_x.append(col * scale)
-                pixel_y.append(row * scale)
-            ax.scatter(
-                pixel_x,
-                pixel_y,
-                c="red",
-                s=15,
-                marker="o",
-                label="Detected Trees",
-            )
-            ax.legend(loc="upper right")
-
-        ax.axis("off")
-        plt.tight_layout()
-
-        return fig
-
-
-# UI Layout
-st.title("🌴 Large-Scale Oil Palm Plantation Detector")
-st.write(
-    "Process full orthomosaics (up to 10GB+) using tiled memory management and automatic coordinate deduplication."
-)
-
-# Hardcoded constants previously in UI
-API_KEY = "yVaMpDjeXPH2Mzqs41u7"
-OVERLAP_SETTING = 25
-TILE_SIZE = 1024
-TILE_OVERLAP = 128
-DEDUP_DISTANCE = 2.0
-
-# Sidebar Settings - Only Confidence Limit slider retained
+# -----------------------------------------------------------------------------
+# SIDEBAR - ONLY CONFIDENCE LIMIT
+# -----------------------------------------------------------------------------
 st.sidebar.header("AI Settings")
 confidence_setting = st.sidebar.slider(
-    "Confidence Limit (%)", min_value=1, max_value=100, value=60
+    "Confidence Limit (%)", min_value=1, max_value=100, value=5
 )
 
-# Input method option for large files
+# -----------------------------------------------------------------------------
+# MAIN CONTENT
+# -----------------------------------------------------------------------------
+st.title("🌴 Oil Palm Precision Center Mapper")
+st.write(
+    "Extract spatial metadata from GeoTIFF files and map palm crowns into a ready-to-export GIS shapefile package."
+)
+
 input_method = st.radio(
     "File Source:",
     [
         "Upload File (Small/Medium)",
-        "Local File Path (Best for 5GB-10GB Files)",
+        "Local File Path (Best for Large Files)",
     ],
 )
 
 tif_path = None
-temp_uploaded_file = None
-
 if input_method == "Upload File (Small/Medium)":
     uploaded_file = st.file_uploader(
         "Upload GeoTIFF (.tif)", type=["tif", "tiff"]
@@ -132,146 +66,115 @@ if input_method == "Upload File (Small/Medium)":
         temp_uploaded_file.close()
         tif_path = temp_uploaded_file.name
 else:
-    tif_path = st.text_input(
-        "Enter absolute file path on server/computer (e.g. /content/large_plot.tif or C:/data/plot.tif)"
-    )
+    tif_path = st.text_input("Enter absolute file path (e.g. /content/501.tif)")
 
-# Store raw prediction objects in session state to allow instant filtering
 if tif_path and os.path.exists(tif_path):
-    if st.button("🚀 Run Full Plot Detection"):
-        temp_dir = tempfile.mkdtemp()
-        try:
-            model = load_roboflow_model(API_KEY, 10)
+    if st.button("🚀 Run AI Precision Pipeline"):
+        with st.spinner(
+            "Extracting spatial metadata and running inference..."
+        ):
+            try:
+                model = load_roboflow_model(API_KEY, 10)
 
-            with rasterio.open(tif_path) as src:
-                width = src.width
-                height = src.height
-                transform = src.transform
-                crs = src.crs
+                # Open drone TIFF to capture real-world map coordinates
+                with rasterio.open(tif_path) as src:
+                    transform = src.transform
+                    crs = src.crs
+                    img_data = src.read()
+                    if len(img_data.shape) == 3:
+                        img_data = np.moveaxis(img_data, 0, -1)
 
-                stride = TILE_SIZE - TILE_OVERLAP
-                x_steps = list(range(0, width, stride))
-                y_steps = list(range(0, height, stride))
-                total_tiles = len(x_steps) * len(y_steps)
+                # Rescale image depth for AI
+                if img_data.dtype != np.uint8:
+                    img_data = cv2.normalize(
+                        img_data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                    )
+                if len(img_data.shape) == 2 or img_data.shape[-1] == 1:
+                    img_data = cv2.cvtColor(img_data, cv2.COLOR_GRAY2RGB)
+                elif img_data.shape[-1] > 3:
+                    img_data = img_data[:, :, :3]
 
-                st.info(
-                    f"📊 Image Dimensions: {width}x{height} px | Grid Split: {total_tiles} Tiles"
+                # Save temporary image for prediction
+                temp_dir = tempfile.mkdtemp()
+                temp_jpg = os.path.join(temp_dir, "temp_ready.jpg")
+                cv2.imwrite(
+                    temp_jpg, cv2.cvtColor(img_data, cv2.COLOR_RGB2BGR)
                 )
 
-                progress_bar = st.progress(0, text="Starting grid tile scan...")
+                # Run inference using user's Confidence slider
+                predictions = model.predict(
+                    temp_jpg,
+                    confidence=confidence_setting,
+                    overlap=OVERLAP_SETTING,
+                ).json()
 
-                raw_predictions = []  # Holds tuples of (Point, confidence)
-                tile_count = 0
-                temp_tile_path = os.path.join(temp_dir, "tile.jpg")
+                map_points = []
+                pixel_coords = []
 
-                # Run tile loop at minimum threshold (1%) to capture all candidates once
-                for y in y_steps:
-                    for x in x_steps:
-                        tile_count += 1
+                if "predictions" in predictions:
+                    for pred in predictions["predictions"]:
+                        pixel_x = pred["x"]
+                        pixel_y = pred["y"]
 
-                        w_width = min(TILE_SIZE, width - x)
-                        w_height = min(TILE_SIZE, height - y)
-                        window = rasterio.windows.Window(
-                            x, y, w_width, w_height
-                        )
+                        # Translate pixel spots directly to GIS map coordinates
+                        map_x, map_y = transform * (pixel_x, pixel_y)
+                        map_points.append(Point(map_x, map_y))
+                        pixel_coords.append((pixel_x, pixel_y))
 
-                        tile_data = src.read(window=window)
-                        if tile_data.shape[0] >= 3:
-                            tile_data = tile_data[:3, :, :]
-                        tile_data = np.moveaxis(tile_data, 0, -1)
-
-                        if tile_data.dtype != np.uint8:
-                            tile_data = cv2.normalize(
-                                tile_data,
-                                None,
-                                0,
-                                255,
-                                cv2.NORM_MINMAX,
-                                dtype=cv2.CV_8U,
-                            )
-
-                        if np.mean(tile_data) < 5:
-                            continue
-
-                        cv2.imwrite(
-                            temp_tile_path,
-                            cv2.cvtColor(tile_data, cv2.COLOR_RGB2BGR),
-                        )
-
-                        # Query model with 1% confidence to get full candidate list
-                        preds = model.predict(
-                            temp_tile_path,
-                            confidence=1,
-                            overlap=OVERLAP_SETTING,
-                        ).json()
-
-                        if "predictions" in preds:
-                            for p in preds["predictions"]:
-                                global_pixel_x = x + p["x"]
-                                global_pixel_y = y + p["y"]
-
-                                map_x, map_y = transform * (
-                                    global_pixel_x,
-                                    global_pixel_y,
-                                )
-                                conf = p.get("confidence", 1.0)
-                                if conf <= 1.0:
-                                    conf = (
-                                        conf * 100
-                                    )  # Normalize to 0-100 scale if needed
-
-                                raw_predictions.append(
-                                    {
-                                        "point": Point(map_x, map_y),
-                                        "confidence": conf,
-                                    }
-                                )
-
-                        progress_percent = int((tile_count / total_tiles) * 100)
-                        progress_bar.progress(
-                            progress_percent,
-                            text=f"Scanning Tile {tile_count}/{total_tiles} ({progress_percent}%) | Candidates: {len(raw_predictions)}",
-                        )
-
-                progress_bar.empty()
-
-                # Save raw candidate cache into Session State
-                st.session_state["cached_predictions"] = raw_predictions
+                st.session_state["map_points"] = map_points
+                st.session_state["pixel_coords"] = pixel_coords
                 st.session_state["crs"] = crs
-                st.session_state["tif_path"] = tif_path
+                st.session_state["img_data"] = img_data
+                st.session_state["processed_path"] = tif_path
 
-        except Exception as e:
-            st.error(f"Error while running plot detection: {e}")
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as e:
+                st.error(f"An error occurred during execution: {e}")
 
-    # Process and Render Results instantly when confidence slider moves
+    # Display results if available for the current active file
     if (
-        "cached_predictions" in st.session_state
-        and st.session_state.get("tif_path") == tif_path
+        "map_points" in st.session_state
+        and st.session_state.get("processed_path") == tif_path
     ):
-        raw_preds = st.session_state["cached_predictions"]
+        map_points = st.session_state["map_points"]
+        pixel_coords = st.session_state["pixel_coords"]
         crs = st.session_state["crs"]
+        img_data = st.session_state["img_data"]
 
-        # Filter points by current confidence slider
-        filtered_points = [
-            item["point"]
-            for item in raw_preds
-            if item["confidence"] >= confidence_setting
-        ]
+        if len(map_points) > 0:
+            st.success(f"🎉 Mapped {len(map_points)} Tree Crown Centers!")
 
-        # Apply spatial deduplication
-        final_points = filter_duplicate_points(
-            filtered_points, distance_threshold_meters=DEDUP_DISTANCE
-        )
+            # -----------------------------------------------------------------
+            # VISUAL PREVIEW
+            # -----------------------------------------------------------------
+            fig, ax = plt.subplots(figsize=(12, 8))
+            ax.imshow(img_data)
 
-        st.success(
-            f"🎉 Displaying Detections: {len(final_points)} Palms at {confidence_setting}% Confidence Threshold"
-        )
+            if pixel_coords:
+                px_x, px_y = zip(*pixel_coords)
+                ax.scatter(
+                    px_x,
+                    px_y,
+                    c="#00FF00",
+                    s=20,
+                    edgecolors="black",
+                    linewidths=1.5,
+                    zorder=5,
+                )
 
-        gdf = gpd.GeoDataFrame(geometry=final_points, crs=crs)
+            ax.set_title(
+                f"AI Center Mapping Preview - Mapped {len(map_points)} Tree Crowns",
+                fontsize=14,
+                fontweight="bold",
+            )
+            ax.axis("off")
+            st.pyplot(fig)
+            plt.close(fig)
 
-        if len(final_points) > 0:
+            # -----------------------------------------------------------------
+            # SHAPEFILE & ATTRIBUTE TABLE EXPORT
+            # -----------------------------------------------------------------
+            gdf = gpd.GeoDataFrame(geometry=map_points, crs=crs)
+
             if crs is not None:
                 gdf_wgs84 = gdf.to_crs(epsg=4326)
                 gdf["Latitude"] = gdf_wgs84.geometry.y.astype(float)
@@ -282,16 +185,32 @@ if tif_path and os.path.exists(tif_path):
 
             gdf["Altitude"] = 0.0
 
-            col1, col2 = st.columns([1, 2])
-            with col2:
-                st.write("Attributes Preview:")
-                st.dataframe(
-                    gdf[["Latitude", "Longitude", "Altitude"]].head(10)
-                )
+            st.markdown("---")
+            st.subheader("📋 Attribute Table Preview")
+            st.dataframe(gdf[["Latitude", "Longitude", "Altitude"]].head(10))
 
-        # Render Image Detection Preview
-        st.markdown("---")
-        st.subheader("🖼️ Detection Visualizer")
-        fig_preview = render_detection_preview(tif_path, gdf)
-        st.pyplot(fig_preview)
-        plt.close(fig_preview)
+            # Build export shapefile zip in a temporary directory
+            zip_temp_dir = tempfile.mkdtemp()
+            output_base = os.path.join(zip_temp_dir, "detected_palm_centers")
+            gdf.to_file(output_base + ".shp", driver="ESRI Shapefile")
+
+            zip_buffer_path = os.path.join(
+                zip_temp_dir, "detected_palm_centers.zip"
+            )
+            with zipfile.ZipFile(zip_buffer_path, "w") as zipf:
+                for ext in [".shp", ".shx", ".dbf", ".prj", ".cpg"]:
+                    file_part = output_base + ext
+                    if os.path.exists(file_part):
+                        zipf.write(file_part, os.path.basename(file_part))
+
+            with open(zip_buffer_path, "rb") as f:
+                st.download_button(
+                    label="💾 Download Shapefile Package (.zip)",
+                    data=f.read(),
+                    file_name="detected_palm_centers.zip",
+                    mime="application/zip",
+                )
+        else:
+            st.warning(
+                "No palm crowns were detected. Try lowering the Confidence Limit in the sidebar."
+            )
