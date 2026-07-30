@@ -97,26 +97,14 @@ st.write(
 # Hardcoded constants previously in UI
 API_KEY = "yVaMpDjeXPH2Mzqs41u7"
 OVERLAP_SETTING = 25
+TILE_SIZE = 1024
+TILE_OVERLAP = 128
+DEDUP_DISTANCE = 2.0
 
-# Sidebar Settings
+# Sidebar Settings - Only Confidence Limit slider retained
 st.sidebar.header("AI Settings")
-
-# Only Confidence Limit slider retained under AI Settings
 confidence_setting = st.sidebar.slider(
     "Confidence Limit (%)", min_value=1, max_value=100, value=60
-)
-
-st.sidebar.header("Tiling Settings")
-tile_size = st.sidebar.selectbox("Tile Size (Pixels)", [512, 640, 1024], index=2)
-tile_overlap = st.sidebar.slider(
-    "Tile Overlap (Pixels)", min_value=32, max_value=256, value=128, step=32
-)
-dedup_distance = st.sidebar.slider(
-    "Duplicate Merge Distance (Meters)",
-    min_value=0.5,
-    max_value=5.0,
-    value=2.0,
-    step=0.5,
 )
 
 # Input method option for large files
@@ -161,7 +149,7 @@ if tif_path and os.path.exists(tif_path):
                 transform = src.transform
                 crs = src.crs
 
-                stride = tile_size - tile_overlap
+                stride = TILE_SIZE - TILE_OVERLAP
                 x_steps = list(range(0, width, stride))
                 y_steps = list(range(0, height, stride))
                 total_tiles = len(x_steps) * len(y_steps)
@@ -181,8 +169,8 @@ if tif_path and os.path.exists(tif_path):
                     for x in x_steps:
                         tile_count += 1
 
-                        w_width = min(tile_size, width - x)
-                        w_height = min(tile_size, height - y)
+                        w_width = min(TILE_SIZE, width - x)
+                        w_height = min(TILE_SIZE, height - y)
                         window = rasterio.windows.Window(
                             x, y, w_width, w_height
                         )
@@ -274,7 +262,7 @@ if tif_path and os.path.exists(tif_path):
 
         # Apply spatial deduplication
         final_points = filter_duplicate_points(
-            filtered_points, distance_threshold_meters=dedup_distance
+            filtered_points, distance_threshold_meters=DEDUP_DISTANCE
         )
 
         st.success(
