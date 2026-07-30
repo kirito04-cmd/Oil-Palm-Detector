@@ -12,7 +12,7 @@ from shapely.geometry import Point
 from scipy.spatial import cKDTree
 from roboflow import Roboflow
 
-st.set_page_config(page_title="Large Scale Oil Palm Detector", layout="wide")
+st.set_page_config(page_title="Oil Palm Detection", layout="wide")
 
 # Cache model connection
 @st.cache_resource
