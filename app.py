@@ -7,6 +7,7 @@ import rasterio.windows
 import geopandas as gpd
 import zipfile
 import tempfile
+import shutil
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
 from scipy.spatial import cKDTree
@@ -14,7 +15,7 @@ from roboflow import Roboflow
 
 st.set_page_config(page_title="Oil Palm Detection", layout="wide")
 
-# Cache model connection
+# Cache model connection to prevent re-instantiating on every rerun
 @st.cache_resource
 def load_roboflow_model(api_key, version_number):
     rf = Roboflow(api_key=api_key)
@@ -36,13 +37,12 @@ def filter_duplicate_points(map_points, distance_threshold_meters=2.0):
         if i in visited:
             continue
         keep.append(map_points[i])
-        # Find all points within the threshold distance and mark them as duplicate
         indices = tree.query_ball_point(point, r=distance_threshold_meters)
         visited.update(indices)
         
     return keep
 
-# Helper function to load a downsampled RGB image and draw points over it
+# Downsamples image safely & renders overlay without memory leaks
 def render_detection_preview(tif_path, gdf, max_dim=1024):
     with rasterio.open(tif_path) as src:
         orig_w, orig_h = src.width, src.height
@@ -53,36 +53,37 @@ def render_detection_preview(tif_path, gdf, max_dim=1024):
         data = src.read([1, 2, 3], out_shape=(3, new_h, new_w))
         data = np.moveaxis(data, 0, -1)
 
-        # Normalize array values to 0-255 if necessary
+        # Normalize array values if necessary
         if data.dtype != np.uint8:
             data = cv2.normalize(data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
-        # Convert detected points from map coordinates to scaled pixel coordinates
-        pixel_x = []
-        pixel_y = []
-        for point in gdf.geometry:
-            # Get row, col in original image dimensions
-            row, col = src.index(point.x, point.y)
-            # Scale down to match preview image dimensions
-            pixel_x.append(col * scale)
-            pixel_y.append(row * scale)
-
         fig, ax = plt.subplots(figsize=(10, 8))
         ax.imshow(data)
-        ax.scatter(pixel_x, pixel_y, c='red', s=15, marker='o', label='Detected Trees')
+
+        # Only draw points if there are actual detections
+        if not gdf.empty:
+            pixel_x = []
+            pixel_y = []
+            for point in gdf.geometry:
+                row, col = src.index(point.x, point.y)
+                pixel_x.append(col * scale)
+                pixel_y.append(row * scale)
+            ax.scatter(pixel_x, pixel_y, c='red', s=15, marker='o', label='Detected Trees')
+            ax.legend(loc="upper right")
+
         ax.axis('off')
-        ax.legend(loc="upper right")
         plt.tight_layout()
         
         return fig
 
+# UI Layout
 st.title("🌴 Large-Scale Oil Palm Plantation Detector")
 st.write("Process full orthomosaics (up to 10GB+) using tiled memory management and automatic coordinate deduplication.")
 
 # Sidebar Settings
 st.sidebar.header("AI Settings")
 api_key = st.sidebar.text_input("Roboflow API Key", value="yVaMpDjeXPH2Mzqs41u7", type="password")
-confidence_setting = st.sidebar.slider("Confidence Limit (%)", min_value=1, max_value=100, value=15)
+confidence_setting = st.sidebar.slider("Confidence Limit (%)", min_value=1, max_value=100, value=40)
 overlap_setting = st.sidebar.slider("AI Internal Overlap (%)", min_value=1, max_value=100, value=30)
 
 st.sidebar.header("Tiling Settings")
@@ -94,18 +95,23 @@ dedup_distance = st.sidebar.slider("Duplicate Merge Distance (Meters)", min_valu
 input_method = st.radio("File Source:", ["Upload File (Small/Medium)", "Local File Path (Best for 5GB-10GB Files)"])
 
 tif_path = None
+temp_uploaded_file = None
 
 if input_method == "Upload File (Small/Medium)":
     uploaded_file = st.file_uploader("Upload GeoTIFF (.tif)", type=["tif", "tiff"])
     if uploaded_file is not None:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tif") as temp_tif:
-            temp_tif.write(uploaded_file.read())
-            tif_path = temp_tif.name
+        # Stream chunks to prevent RAM spikes on large uploads
+        temp_uploaded_file = tempfile.NamedTemporaryFile(delete=False, suffix=".tif")
+        while chunk := uploaded_file.read(8 * 1024 * 1024):  # Read in 8MB chunks
+            temp_uploaded_file.write(chunk)
+        temp_uploaded_file.close()
+        tif_path = temp_uploaded_file.name
 else:
     tif_path = st.text_input("Enter absolute file path on server/computer (e.g. /content/large_plot.tif or C:/data/plot.tif)")
 
 if tif_path and os.path.exists(tif_path):
     if st.button("🚀 Run Full Plot Detection"):
+        temp_dir = tempfile.mkdtemp()
         try:
             model = load_roboflow_model(api_key, 10)
             
@@ -126,8 +132,6 @@ if tif_path and os.path.exists(tif_path):
                 
                 raw_map_points = []
                 tile_count = 0
-
-                temp_dir = tempfile.mkdtemp()
                 temp_tile_path = os.path.join(temp_dir, "tile.jpg")
 
                 # Iterate through grid windows without loading full image to RAM
@@ -160,11 +164,9 @@ if tif_path and os.path.exists(tif_path):
 
                         if "predictions" in preds:
                             for p in preds["predictions"]:
-                                # Convert tile-relative coordinates to full image coordinates
                                 global_pixel_x = x + p["x"]
                                 global_pixel_y = y + p["y"]
 
-                                # Translate to map GIS coordinates
                                 map_x, map_y = transform * (global_pixel_x, global_pixel_y)
                                 raw_map_points.append(Point(map_x, map_y))
 
@@ -183,10 +185,11 @@ if tif_path and os.path.exists(tif_path):
 
                 st.success(f"🎉 Plot Scanning Complete! Total Trees Detected: {len(final_points)} (Removed {len(raw_map_points) - len(final_points)} duplicates)")
 
-                # Export Shapefile
+                # Create GeoDataFrame regardless of count
+                gdf = gpd.GeoDataFrame(geometry=final_points, crs=crs)
+
+                # Export Shapefile & Table Preview if points found
                 if len(final_points) > 0:
-                    gdf = gpd.GeoDataFrame(geometry=final_points, crs=crs)
-                    
                     if crs is not None:
                         gdf_wgs84 = gdf.to_crs(epsg=4326)
                         gdf['Latitude'] = gdf_wgs84.geometry.y.astype(float)
@@ -220,12 +223,18 @@ if tif_path and os.path.exists(tif_path):
                         st.write("Attributes Preview:")
                         st.dataframe(gdf[['Latitude', 'Longitude', 'Altitude']].head(10))
 
-                    # --- ADDED: Image Detection Preview Section ---
-                    st.markdown("---")
-                    st.subheader("🖼️ Detection Visualizer")
-                    with st.spinner("Generating downsampled image preview with overlay..."):
-                        fig_preview = render_detection_preview(tif_path, gdf)
-                        st.pyplot(fig_preview)
+                # Image Detection Preview
+                st.markdown("---")
+                st.subheader("🖼️ Detection Visualizer")
+                with st.spinner("Generating downsampled image preview with overlay..."):
+                    fig_preview = render_detection_preview(tif_path, gdf)
+                    st.pyplot(fig_preview)
+                    plt.close(fig_preview)  # Prevent Matplotlib RAM memory leaks
 
         except Exception as e:
             st.error(f"Error while running plot detection: {e}")
+        finally:
+            # Clean up temporary directories and uploaded cache files
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            if temp_uploaded_file and os.path.exists(temp_uploaded_file.name):
+                os.remove(temp_uploaded_file.name)
