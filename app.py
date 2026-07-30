@@ -42,6 +42,40 @@ def filter_duplicate_points(map_points, distance_threshold_meters=2.0):
         
     return keep
 
+# Helper function to load a downsampled RGB image and draw points over it
+def render_detection_preview(tif_path, gdf, max_dim=1024):
+    with rasterio.open(tif_path) as src:
+        orig_w, orig_h = src.width, src.height
+        scale = max_dim / max(orig_w, orig_h)
+        new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+
+        # Read downsampled RGB bands
+        data = src.read([1, 2, 3], out_shape=(3, new_h, new_w))
+        data = np.moveaxis(data, 0, -1)
+
+        # Normalize array values to 0-255 if necessary
+        if data.dtype != np.uint8:
+            data = cv2.normalize(data, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+        # Convert detected points from map coordinates to scaled pixel coordinates
+        pixel_x = []
+        pixel_y = []
+        for point in gdf.geometry:
+            # Get row, col in original image dimensions
+            row, col = src.index(point.x, point.y)
+            # Scale down to match preview image dimensions
+            pixel_x.append(col * scale)
+            pixel_y.append(row * scale)
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.imshow(data)
+        ax.scatter(pixel_x, pixel_y, c='red', s=15, marker='o', label='Detected Trees')
+        ax.axis('off')
+        ax.legend(loc="upper right")
+        plt.tight_layout()
+        
+        return fig
+
 st.title("🌴 Large-Scale Oil Palm Plantation Detector")
 st.write("Process full orthomosaics (up to 10GB+) using tiled memory management and automatic coordinate deduplication.")
 
@@ -185,6 +219,13 @@ if tif_path and os.path.exists(tif_path):
                     with col2:
                         st.write("Attributes Preview:")
                         st.dataframe(gdf[['Latitude', 'Longitude', 'Altitude']].head(10))
+
+                    # --- ADDED: Image Detection Preview Section ---
+                    st.markdown("---")
+                    st.subheader("🖼️ Detection Visualizer")
+                    with st.spinner("Generating downsampled image preview with overlay..."):
+                        fig_preview = render_detection_preview(tif_path, gdf)
+                        st.pyplot(fig_preview)
 
         except Exception as e:
             st.error(f"Error while running plot detection: {e}")
